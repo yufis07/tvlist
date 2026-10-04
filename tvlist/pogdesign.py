@@ -81,12 +81,23 @@ _CATALOGUE_BOX_RE = re.compile(
 _SUMMARY_LINK_RE = re.compile(r'<a href="([^"]+-summary)"')
 _H2_RE = re.compile(r"<h2>(.*?)</h2>", re.S)
 _CHECKBOX_VALUE_RE = re.compile(r'<input[^>]*type="checkbox"[^>]*value="([^"]+)"')
+# Loose fallbacks used when the page layout isn't the one we know.
+_ANY_SUMMARY_A_RE = re.compile(
+    r'<a\b[^>]*href="((?:https?://www\.pogdesign\.co\.uk)?/?(?:cat/)?([A-Za-z0-9][^"/<>]*?)-summary)"[^>]*>(.*?)</a>',
+    re.S | re.I,
+)
+_ENDED_HEADING_RE = re.compile(r">[^<]*(cancelled|have ended|ended shows)[^<]*<", re.I)
 
 
-def parse_catalogue(page: str) -> list[Show]:
-    """Parse one ``/cat/all-shows/<letter>`` page."""
-    # Split the page into (section heading, chunk) pieces so we know which
-    # shows are under "Shows Cancelled or Have Ended".
+def _text(fragment: str) -> str:
+    return html.unescape(re.sub(r"<[^>]+>", " ", fragment)).strip()
+
+
+def _clean_text(fragment: str) -> str:
+    return re.sub(r"\s+", " ", _text(fragment)).strip()
+
+
+def _parse_catalogue_strict(page: str) -> list[Show]:
     shows: list[Show] = []
     sections = _CATALOGUE_SECTION_RE.split(page)
     # sections = [pre, heading1, chunk1, heading2, chunk2, ...]
@@ -103,7 +114,7 @@ def parse_catalogue(page: str) -> list[Show]:
             shows.append(
                 Show(
                     id=sid.group(1),
-                    name=html.unescape(re.sub(r"<[^>]+>", "", name.group(1))).strip(),
+                    name=_clean_text(name.group(1)),
                     url=urllib.parse.urljoin(BASE, link.group(1)),
                     ended=ended,
                     # Boxes for shows that are *not* in your filter carry the
@@ -111,6 +122,40 @@ def parse_catalogue(page: str) -> list[Show]:
                     tracked=bool(classes) and "removed" not in classes,
                 )
             )
+    return shows
+
+
+def _parse_catalogue_loose(page: str) -> list[Show]:
+    """Find every ``<Slug>-summary`` link, whatever markup surrounds it."""
+    ended_m = _ENDED_HEADING_RE.search(page)
+    ended_from = ended_m.start() if ended_m else len(page) + 1
+    out: dict[str, Show] = {}
+    for m in _ANY_SUMMARY_A_RE.finditer(page):
+        href, slug, inner = m.group(1), m.group(2), m.group(3)
+        h2 = re.search(r"<h[1-6][^>]*>(.*?)</h[1-6]>", inner, re.S)
+        name = _clean_text(h2.group(1) if h2 else inner)
+        if not name or "summary" in name.lower() or len(name) > 120:
+            img_alt = re.search(r'alt="([^"]+)"', inner)
+            name = html.unescape(img_alt.group(1)).strip() if img_alt else ""
+        if not name or slug in out:
+            continue
+        out[slug] = Show(
+            # Without the known layout we can't be sure which checkbox belongs
+            # to which show, so key by slug; show-select supplies real ids.
+            id=f"slug:{slug}",
+            name=name,
+            url=urllib.parse.urljoin(BASE, "/cat/" + slug + "-summary"),
+            ended=m.start() > ended_from,
+        )
+    return list(out.values())
+
+
+def parse_catalogue(page: str) -> list[Show]:
+    """Parse one ``/cat/all-shows/<letter>`` page."""
+    shows = _parse_catalogue_strict(page)
+    seen = {s.url for s in shows}
+    # Add anything the strict parser missed (e.g. a different logged-in layout).
+    shows += [s for s in _parse_catalogue_loose(page) if s.url not in seen]
     return shows
 
 
@@ -135,46 +180,89 @@ def parse_show_select(page: str) -> list[Show]:
     return out
 
 
-_EP_LI_RE = re.compile(r'<li class="ep ([^"]*)"[^>]*itemprop="episode"[^>]*>(.*?)</li>', re.S)
-_SEASON_RE = re.compile(r'itemprop="seasonNumber">\s*(\d+)\s*<')
-_EPNUM_RE = re.compile(r'itemprop="episodeNumber"\s+content="(\d+)"')
-_DATE_RE = re.compile(r'itemprop="releasedEvent"\s+content="(\d{4}-\d{2}-\d{2})"')
+_EP_LI_RE = re.compile(r'<li\b([^>]*\bclass="[^"]*\bep\b[^"]*"[^>]*)>(.*?)</li>', re.S)
+_CLASS_RE = re.compile(r'\bclass="([^"]*)"')
+_SEASON_RE = re.compile(r'itemprop="seasonNumber"[^>]*>\s*(\d+)\s*<')
+_EPNUM_RE = re.compile(r'itemprop="episodeNumber"[^>]*\bcontent="(\d+)"')
+_EPURL_RE = re.compile(r"/Season-(\d+)/Episode-(\d+)", re.I)
+_DATE_RE = re.compile(r'itemprop="releasedEvent"[^>]*\bcontent="(\d{4}-\d{2}-\d{2})"')
+_ANY_DATE_RE = re.compile(r'(?:content|datetime)="(\d{4}-\d{2}-\d{2})')
 _TITLE_RE = re.compile(r'itemprop="name"[^>]*>\s*<a[^>]*>(.*?)</a>', re.S)
-_WATCH_INPUT_RE = re.compile(r'<input[^>]*class="watchcheck"[^>]*>')
-_VALUE_RE = re.compile(r'value="([^"]+)"')
+_PNAME_RE = re.compile(r'class="pname"[^>]*>(.*?)</strong>', re.S)
+_INPUT_RE = re.compile(r"<input\b[^>]*>", re.I)
+_WATCH_VALUE_RE = re.compile(r'value="((\d+)-(\d+)-(\d+)/\d+-\d+)"')
+_SHOW_ID_HINT_RE = re.compile(r'value="(\d+)[_-]\d+')
 
 
-def parse_summary(page: str) -> list[Episode]:
-    """Parse a show's ``-summary`` page into its episode list."""
-    eps: list[Episode] = []
+def _date(text: str | None) -> _dt.date | None:
+    try:
+        return _dt.date.fromisoformat(text) if text else None
+    except ValueError:
+        return None
+
+
+def parse_summary(page: str, today: _dt.date | None = None) -> list[Episode]:
+    """Parse a show's ``-summary`` page into its episode list.
+
+    Each field has fallbacks so small layout differences (for example the
+    logged-in version of the page) don't break parsing.
+    """
+    today = today or _dt.date.today()
+    hint = _SHOW_ID_HINT_RE.search(page)
+    show_id = hint.group(1) if hint else None
+    eps: dict[tuple[int, int], Episode] = {}
     for m in _EP_LI_RE.finditer(page):
-        classes, body = m.group(1).split(), m.group(2)
+        cls_m = _CLASS_RE.search(m.group(1))
+        classes, body = (cls_m.group(1).split() if cls_m else []), m.group(2)
+
+        value = None
+        checked = False
+        for inp in _INPUT_RE.findall(body):
+            v = _WATCH_VALUE_RE.search(inp)
+            if v:
+                value = v
+                checked = bool(re.search(r"\bchecked\b", inp, re.I))
+                break
+
         season = _SEASON_RE.search(body)
         num = _EPNUM_RE.search(body)
-        if not (season and num):
+        url = _EPURL_RE.search(body)
+        if season and num:
+            sn, en = int(season.group(1)), int(num.group(1))
+        elif url:
+            sn, en = int(url.group(1)), int(url.group(2))
+        elif value:
+            sn, en = int(value.group(3)), int(value.group(4))
+        else:
             continue
-        date_m = _DATE_RE.search(body)
-        try:
-            air_date = _dt.date.fromisoformat(date_m.group(1)) if date_m else None
-        except ValueError:
-            air_date = None
-        title_m = _TITLE_RE.search(body)
-        inp = _WATCH_INPUT_RE.search(body)
-        value = _VALUE_RE.search(inp.group(0)).group(1) if inp and _VALUE_RE.search(inp.group(0)) else None
-        aired = "punaired" not in body and value is not None
-        watched = "infochecked" in classes or bool(inp and re.search(r"\bchecked\b", inp.group(0)))
-        eps.append(
-            Episode(
-                season=int(season.group(1)),
-                number=int(num.group(1)),
-                title=html.unescape(re.sub(r"<[^>]+>", "", title_m.group(1))).strip() if title_m else "",
-                air_date=air_date,
-                aired=aired,
-                watched=watched,
-                watch_value=value,
-            )
-        )
-    return eps
+
+        date_m = _DATE_RE.search(body) or _ANY_DATE_RE.search(body)
+        air_date = _date(date_m.group(1) if date_m else None)
+
+        if "punaired" in body or re.search(r">\s*UNAIRED\s*<", body):
+            aired = False
+        elif value or "paired" in body or re.search(r">\s*AIRED\s*<", body):
+            aired = True
+        else:
+            aired = air_date is not None and air_date <= today
+
+        watch_value = value.group(1) if value else None
+        if aired and not watch_value and show_id:
+            # Same format the site uses: <showid>-<season>-<ep>/<month>-<year>
+            d = air_date or today
+            watch_value = f"{show_id}-{sn}-{en:02d}/{d.month}-{d.year}"
+
+        title_m = _TITLE_RE.search(body) or _PNAME_RE.search(body)
+        eps.setdefault((sn, en), Episode(
+            season=sn,
+            number=en,
+            title=_clean_text(title_m.group(1)) if title_m else "",
+            air_date=air_date,
+            aired=aired,
+            watched="infochecked" in classes or checked,
+            watch_value=watch_value,
+        ))
+    return list(eps.values())
 
 
 def page_is_logged_in(page: str) -> bool:
@@ -268,28 +356,56 @@ class PogClient:
             if not page_is_logged_in(page):
                 raise LoginError("Login failed - check your e-mail and password.")
 
+    def save_unreadable(self, name: str, page: str) -> str | None:
+        """Keep a page we couldn't parse so the user can send it in."""
+        from . import config  # local import: config is optional for library use
+        try:
+            d = config.DIR / "unreadable"
+            d.mkdir(parents=True, exist_ok=True)
+            path = d / (re.sub(r"[^A-Za-z0-9]+", "_", name)[:60] + ".html")
+            path.write_text(page, encoding="utf-8")
+            return str(path)
+        except OSError:
+            return None
+
     def fetch_catalogue(self, progress=None) -> dict[str, Show]:
-        shows: dict[str, Show] = {}
+        by_url: dict[str, Show] = {}
         letters = ["0"] + list(string.ascii_uppercase)
         for i, letter in enumerate(letters):
             if progress:
                 progress(f"Downloading show catalogue {i + 1}/{len(letters)} ({letter})")
-            for s in parse_catalogue(self._request(f"all-shows/{letter}")):
-                shows.setdefault(s.id, s)
+            page = self._request(f"all-shows/{letter}")
+            found = parse_catalogue(page)
+            if not found:
+                saved = self.save_unreadable(f"all-shows_{letter}", page)
+                if progress:
+                    progress(f"Warning: no shows read from catalogue page {letter}"
+                             + (f" (saved to {saved})" if saved else ""))
+            for s in found:
+                by_url.setdefault(s.url, s)
         # The show-select page reliably marks which shows are in your filter.
         try:
             for s in parse_show_select(self._request("show-select")):
-                if s.id in shows:
-                    shows[s.id].tracked = shows[s.id].tracked or s.tracked
-                else:
-                    shows[s.id] = s
+                known = by_url.get(s.url)
+                if known is None:
+                    by_url[s.url] = s
+                    continue
+                known.tracked = known.tracked or s.tracked
+                if known.id.startswith("slug:"):
+                    known.id = s.id
         except PogError as e:  # non fatal
             if progress:
                 progress(f"Warning: could not read show-select page ({e})")
-        return shows
+        return {s.id: s for s in by_url.values()}
 
     def fetch_episodes(self, show: Show) -> list[Episode]:
-        return parse_summary(self._request(show.url))
+        page = self._request(show.url)
+        eps = parse_summary(page)
+        if not eps:
+            saved = self.save_unreadable(show.url.rsplit("/", 1)[-1], page)
+            raise PogError("could not read the episode list from the show page"
+                           + (f" - page saved to {saved}" if saved else ""))
+        return eps
 
     def mark_watched(self, ep: Episode, show: Show | None = None) -> str:
         """Tick one episode, exactly as clicking its checkbox on the show page does.

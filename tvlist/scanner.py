@@ -22,6 +22,11 @@ _NX_RE = re.compile(r"(?<![a-z0-9])(\d{1,2})x(\d{2,3})((?:-\d{2,3})*)(?![0-9p])"
 _EXTRA_NUM_RE = re.compile(r"(-)?\s*e?(\d{1,3})", re.I)
 
 _SEASON_DIR_RE = re.compile(r"^(season|series|staffel|saison|temporada|s)[ ._-]*\d{1,3}$|^specials?$", re.I)
+# "Silo - Season 1", "Bob's Burgers - Specials", "Fargo Series 2", "Lost.S03"
+_SHOW_SEASON_DIR_RE = re.compile(
+    r"^(?P<show>.+?)[ ._]*[-–]?[ ._]*(?:(?:season|series|staffel|saison|temporada|s)[ ._-]*\d{1,3}\b.*|specials?)$",
+    re.I,
+)
 _YEAR_RE = re.compile(r"[\(\[]?\b(19\d{2}|20\d{2})\b[\)\]]?")
 
 
@@ -68,7 +73,10 @@ def _show_folder(file_path: Path, root: Path) -> str | None:
     parent = file_path.parent
     while parent != root and _SEASON_DIR_RE.match(parent.name.strip()):
         parent = parent.parent
-    return None if parent == root else parent.name
+    if parent == root:
+        return None
+    m = _SHOW_SEASON_DIR_RE.match(parent.name.strip())
+    return m.group("show") if m and m.group("show").strip(" -._") else parent.name
 
 
 def scan(roots: list[str], progress=None) -> list[LocalEpisode]:

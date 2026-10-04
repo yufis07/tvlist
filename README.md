@@ -46,6 +46,7 @@ You'll be prompted for the password, or you can set the `POG_EMAIL` / `POG_PASSW
 ```
 TV/Show Name (2026)/Season 01/Show Name (2026) - S01E01.mkv
 TV/Show Name/S01/episode.s01e01.mkv
+TV/Show Name - Season 1/Show Name - S01E01 - Title.mkv
 TV/Show.Name.S01E01.720p.HDTV.mkv          (no show folder: uses the file name)
 ```
 
@@ -68,6 +69,7 @@ If a show can't be matched, it shows up under **LOCAL SHOWS NOT FOUND ON POGDESI
 
 * After ticking, the app **re-reads each show's page to check the ticks stuck**. Any that didn't are listed under **TICKS NOT CONFIRMED**.
 * The **Show summary** at the end of the report shows which local folder matched which PoGDesign show, for example `Scrubs (2026) <- local 'Scrubs'`. Check it for wrong matches.
+* If the app can't read a page from the site, it says so in the report and saves that page to `~/.tvlist/unreadable/`. Send one of those files along with any bug report.
 * Tick **Save debug files** (or pass `--debug`) to save every page the site returns to `~/.tvlist/debug/<date-time>/`. These pages can include your e-mail address. Your password is never saved.
 
 ## Privacy

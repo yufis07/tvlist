@@ -1,11 +1,14 @@
 import datetime as dt
+import re
 import tempfile
 import unittest
 from pathlib import Path
 
 from tvlist.matcher import ShowMatcher, normalize
+from tvlist import config
 from tvlist.pogdesign import (
-    Episode, Show, page_is_logged_in, parse_catalogue, parse_show_select, parse_summary,
+    Episode, PogClient, PogError, Show, page_is_logged_in, parse_catalogue,
+    parse_show_select, parse_summary,
 )
 from tvlist.scanner import parse_episode_numbers, scan
 from tvlist.sync import Options, run_sync
@@ -53,6 +56,59 @@ class ParseSite(unittest.TestCase):
         self.assertEqual(shows["Scrubs (2026)"].id, "41107")
         self.assertEqual(sum(s.tracked for s in shows.values()), 1)
 
+    def test_summary_tolerates_layout_changes(self):
+        # Strip the schema.org attributes and rename the checkbox class: the
+        # parser must still find every episode via the episode links.
+        page = re.sub(r' itemprop="[^"]*"', "", fixture("summary_scrubs.html"))
+        page = page.replace('class="watchcheck"', 'class="chk on"')
+        eps = {e.code: e for e in parse_summary(page, today=dt.date(2026, 10, 4))}
+        self.assertEqual(len(eps), 12)
+        self.assertEqual(eps["S02E01"].watch_value, "41107-2-01/10-2026")
+        self.assertTrue(eps["S02E01"].aired)
+        self.assertFalse(eps["S02E03"].aired)
+
+    def test_summary_builds_missing_checkbox_value(self):
+        # Aired episode without a checkbox: value is built from the show id.
+        page = re.sub(r'<input id="s2e02i41107"[^>]*>', "", fixture("summary_scrubs.html"))
+        eps = {e.code: e for e in parse_summary(page, today=dt.date(2026, 10, 4))}
+        self.assertEqual(eps["S02E02"].watch_value, "41107-2-02/10-2026")
+
+    def test_summary_checked_input_means_watched(self):
+        page = fixture("summary_scrubs.html").replace(
+            'value="41107-2-01/10-2026"', 'value="41107-2-01/10-2026" checked', 1)
+        eps = {e.code: e for e in parse_summary(page)}
+        self.assertTrue(eps["S02E01"].watched)
+        self.assertFalse(eps["S02E02"].watched)
+
+    def test_catalogue_loose_fallback(self):
+        page = """<html><body>
+          <section><h3>Currently Airing</h3>
+            <div class="card"><a href="https://www.pogdesign.co.uk/cat/Silo-summary"><b>Silo</b></a>
+              <input type="checkbox" value="2900"></div></section>
+          <h2>[ S ] - Shows Cancelled or Have Ended</h2>
+            <div class="card"><a href="/cat/Sherlock-summary"><h2>Sherlock</h2></a></div>
+        </body></html>"""
+        shows = {s.name: s for s in parse_catalogue(page)}
+        self.assertEqual(set(shows), {"Silo", "Sherlock"})
+        self.assertFalse(shows["Silo"].ended)
+        self.assertTrue(shows["Sherlock"].ended)
+        self.assertTrue(shows["Sherlock"].url.endswith("/cat/Sherlock-summary"))
+
+    def test_unreadable_show_page_is_reported_and_saved(self):
+        class Offline(PogClient):
+            def _request(self, url, data=None, ajax=False, referer=None):
+                return "<html><body>Something completely different</body></html>"
+
+        with tempfile.TemporaryDirectory() as d:
+            old, config.DIR = config.DIR, Path(d)
+            try:
+                with self.assertRaises(PogError) as cm:
+                    Offline().fetch_episodes(Show("1", "Silo", "https://x/cat/Silo-summary"))
+                self.assertIn("could not read the episode list", str(cm.exception))
+                self.assertTrue((Path(d) / "unreadable" / "Silo_summary.html").exists())
+            finally:
+                config.DIR = old
+
     def test_login_detection(self):
         self.assertFalse(page_is_logged_in(fixture("login_form.html")))
         self.assertTrue(page_is_logged_in('<a href="/cat/logout">Log Out</a>'))
@@ -85,11 +141,17 @@ class ParseFiles(unittest.TestCase):
                 "Scrubs (2026)/Season 01/sample-S01E01.mkv",
                 "Scrubs (2026)/notes.txt",
             ]
+            files.append("Silo - Season 2/Silo - S02E03 - Title.mkv")
+            files.append("9-1-1 - Nashville - Season 1/S01E01.mkv")
             for f in files:
                 (root / f).parent.mkdir(parents=True, exist_ok=True)
                 (root / f).write_bytes(b"")
             eps = sorted(scan([d]), key=lambda e: e.path)
-            self.assertEqual(len(eps), 3)
+            self.assertEqual(len(eps), 5)
+            silo = [e for e in eps if "Silo" in e.path][0]
+            self.assertEqual(silo.show_candidates[0], "Silo")
+            nash = [e for e in eps if "Nashville" in e.path][0]
+            self.assertEqual(nash.show_candidates[0], "9-1-1 - Nashville")
             loose = [e for e in eps if "Loose" in e.path][0]
             self.assertEqual(loose.show_candidates[0], "Loose Show Name")
             scrubs = [e for e in eps if "Scrubs" in e.path]
@@ -111,6 +173,8 @@ class Matching(unittest.TestCase):
     def test_normalize(self):
         self.assertEqual(normalize("The Office (US)"), "office us")
         self.assertEqual(normalize("Office, The"), "office")
+        self.assertEqual(normalize("Chicago P.D."), normalize("Chicago PD"))
+        self.assertEqual(normalize("9-1-1: Nashville"), normalize("9-1-1 - Nashville"))
 
     def test_match(self):
         self.assertEqual(self.m.match("Scrubs").id, "1")

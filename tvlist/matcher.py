@@ -20,6 +20,8 @@ def normalize(name: str, keep_year: bool = True) -> str:
         s = _YEAR_RE.sub(" ", s)
     s = re.sub(r"^the\s+", "", s.strip())
     s = re.sub(r"\s+the$", "", s)  # "Office, The"
+    # Join spelled-out initials: "p d" -> "pd", "s w a t" -> "swat"
+    s = re.sub(r"\b([a-z0-9])\s+(?=[a-z0-9]\b)", r"\1", s)
     return re.sub(r"\s+", " ", s).strip()
 
 

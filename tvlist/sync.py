@@ -82,6 +82,10 @@ def format_report(rep: SyncReport) -> str:
              f"{sum(1 for r in rep.results if r.marked)} show(s).")
     L.append(f"{total_missing} released episode(s) are missing from your drive.")
     L.append(f"Episode files found on disk: {rep.local_files}.")
+    failed = sum(1 for r in rep.results if r.error)
+    if failed:
+        L.append(f"WARNING: {failed} show page(s) could not be read, so those shows were "
+                 "not checked - see ERRORS below.")
     total_unconfirmed = sum(len(r.unconfirmed) for r in rep.results)
     if total_unconfirmed:
         L.append(f"WARNING: {total_unconfirmed} tick(s) did not stick on PoGDesign - "
@@ -113,7 +117,8 @@ def format_report(rep: SyncReport) -> str:
                     seen = "  (marked watched on site)" if e.watched else ""
                     L.append(f"   {e.code}  {date}  {e.title}{seen}")
     if not any_missing:
-        L.append("\nNothing missing - you have every released episode. ")
+        L.append("\nNothing missing" + (" among the shows that could be read." if failed
+                                         else " - you have every released episode."))
 
     L.append("")
     L.append("=" * 70)
