@@ -64,6 +64,12 @@ If a show can't be matched, it shows up under **LOCAL SHOWS NOT FOUND ON POGDESI
 * **LOCAL EPISODES NOT LISTED ON POGDESIGN**: files whose episode number the site doesn't know or hasn't aired yet. This often points to a naming or numbering mismatch.
 * **LOCAL SHOWS NOT FOUND ON POGDESIGN**: candidates for aliases.
 
+## Troubleshooting
+
+* After ticking, the app **re-reads each show's page to check the ticks stuck**. Any that didn't are listed under **TICKS NOT CONFIRMED**.
+* The **Show summary** at the end of the report shows which local folder matched which PoGDesign show, for example `Scrubs (2026) <- local 'Scrubs'`. Check it for wrong matches.
+* Tick **Save debug files** (or pass `--debug`) to save every page the site returns to `~/.tvlist/debug/<date-time>/`. These pages can include your e-mail address. Your password is never saved.
+
 ## Privacy
 
 Your password is sent only to pogdesign.co.uk and is never saved. If you tick "Remember e-mail", the e-mail and folder list are stored in `~/.tvlist/settings.json`.

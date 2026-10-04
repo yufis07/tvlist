@@ -26,6 +26,8 @@ class Options:
     # Hide missing episodes you already marked watched on the site.
     hide_watched_missing: bool = False
     aliases: dict[str, str] = field(default_factory=dict)
+    # Save every page PoGDesign returns into this folder (troubleshooting).
+    debug_dir: str | None = None
 
 
 @dataclass
@@ -36,6 +38,9 @@ class ShowResult:
     already_watched: int = 0
     missing: list[Episode] = field(default_factory=list)
     extra_local: list[str] = field(default_factory=list)  # on disk but unknown to site
+    # Ticked, but the show page still shows them unwatched afterwards.
+    unconfirmed: list[Episode] = field(default_factory=list)
+    local_names: set[str] = field(default_factory=set)
     error: str | None = None
 
 
@@ -43,6 +48,7 @@ class ShowResult:
 class SyncReport:
     results: list[ShowResult] = field(default_factory=list)
     unmatched_local: dict[str, int] = field(default_factory=dict)  # name -> file count
+    local_files: int = 0
     dry_run: bool = False
     generated: _dt.datetime = field(default_factory=_dt.datetime.now)
 
@@ -75,6 +81,11 @@ def format_report(rep: SyncReport) -> str:
     L.append(f"{verb} {total_marked} episode(s) as watched across "
              f"{sum(1 for r in rep.results if r.marked)} show(s).")
     L.append(f"{total_missing} released episode(s) are missing from your drive.")
+    L.append(f"Episode files found on disk: {rep.local_files}.")
+    total_unconfirmed = sum(len(r.unconfirmed) for r in rep.results)
+    if total_unconfirmed:
+        L.append(f"WARNING: {total_unconfirmed} tick(s) did not stick on PoGDesign - "
+                 "see 'TICKS NOT CONFIRMED' below.")
     L.append("")
 
     L.append("=" * 70)
@@ -119,6 +130,20 @@ def format_report(rep: SyncReport) -> str:
     if not total_marked:
         L.append("\nNothing new to mark.")
 
+    unconf = [r for r in rep.results if r.unconfirmed]
+    if unconf:
+        L.append("")
+        L.append("=" * 70)
+        L.append("TICKS NOT CONFIRMED (sent to the site, but the show page still shows")
+        L.append("them as unwatched afterwards)")
+        L.append("=" * 70)
+        for r in unconf:
+            by_season: dict[int, list[int]] = defaultdict(list)
+            for e in r.unconfirmed:
+                by_season[e.season].append(e.number)
+            seasons = "; ".join(f"S{s}: {_ranges(n)}" for s, n in sorted(by_season.items()))
+            L.append(f"   {r.show.name}: {seasons}")
+
     errors = [r for r in rep.results if r.error]
     if errors:
         L.append("")
@@ -149,7 +174,8 @@ def format_report(rep: SyncReport) -> str:
     L.append("")
     L.append("Show summary:")
     for r in sorted(rep.results, key=lambda r: r.show.name.lower()):
-        L.append(f"   {r.show.name}: {r.local_files} local file(s), "
+        local = f" <- local '{', '.join(sorted(r.local_names))}'" if r.local_names else ""
+        L.append(f"   {r.show.name}{local}: {r.local_files} local file(s), "
                  f"{len(r.marked)} newly marked, {r.already_watched} already watched, "
                  f"{len(r.missing)} missing")
     return "\n".join(L) + "\n"
@@ -166,11 +192,14 @@ def load_aliases(path: str | Path) -> dict[str, str]:
 def run_sync(opts: Options, log=print, client: PogClient | None = None,
              today: _dt.date | None = None) -> SyncReport:
     today = today or _dt.date.today()
-    client = client or PogClient()
+    client = client or PogClient(debug_dir=opts.debug_dir)
+    if opts.debug_dir:
+        log(f"Debug: saving every PoGDesign page to {opts.debug_dir}")
     report = SyncReport(dry_run=opts.dry_run)
 
     log("Scanning local folders...")
     local = scan(opts.folders, progress=log)
+    report.local_files = len(local)
     if not local:
         log("No episode files found (expected names like 'Show - S01E02.mkv' or '1x02').")
 
@@ -184,11 +213,13 @@ def run_sync(opts: Options, log=print, client: PogClient | None = None,
 
     matcher = ShowMatcher(catalogue, opts.aliases)
     by_show: dict[str, list[LocalEpisode]] = defaultdict(list)
+    names: dict[str, set[str]] = defaultdict(set)
     unmatched: dict[str, int] = defaultdict(int)
     for le in local:
         show = matcher.match_any(le.show_candidates)
         if show:
             by_show[show.id].append(le)
+            names[show.id].add(le.show_candidates[0])
         else:
             unmatched[le.show_candidates[0]] += 1
     report.unmatched_local = dict(unmatched)
@@ -201,7 +232,8 @@ def run_sync(opts: Options, log=print, client: PogClient | None = None,
 
     for i, sid in enumerate(show_ids, 1):
         show = catalogue[sid]
-        res = ShowResult(show=show, local_files=len(by_show.get(sid, [])))
+        res = ShowResult(show=show, local_files=len(by_show.get(sid, [])),
+                         local_names=names.get(sid, set()))
         report.results.append(res)
         log(f"[{i}/{len(show_ids)}] {show.name}")
         try:
@@ -237,13 +269,23 @@ def run_sync(opts: Options, log=print, client: PogClient | None = None,
             done = []
             for ep in res.marked:
                 try:
-                    client.mark_watched(ep)
+                    client.mark_watched(ep, show)
                 except PogError as e:
                     res.error = f"failed marking {ep.code}: {e}"
                     log(f"   {res.error}")
                     break
                 done.append(ep)
             res.marked = done
+            if done:
+                # Re-read the show page to make sure the ticks actually stuck.
+                try:
+                    now = {(e.season, e.number): e.watched for e in client.fetch_episodes(show)}
+                    res.unconfirmed = [e for e in done if not now.get((e.season, e.number))]
+                except PogError as e:
+                    log(f"   could not verify ticks: {e}")
+                if res.unconfirmed:
+                    log(f"   WARNING: {len(res.unconfirmed)} of {len(done)} tick(s) "
+                        "not confirmed by the site")
         if res.marked:
             log(f"   {'would mark' if opts.dry_run else 'marked'} {len(res.marked)} as watched")
         if res.missing:

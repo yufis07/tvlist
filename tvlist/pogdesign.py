@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime as _dt
 import html
 import http.cookiejar
+import itertools
 import re
 import string
 import time
@@ -22,6 +23,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
+from pathlib import Path
 
 BASE = "https://www.pogdesign.co.uk/cat/"
 USER_AGENT = (
@@ -191,9 +193,12 @@ def page_is_logged_in(page: str) -> bool:
 class PogClient:
     delay: float = 0.3  # seconds between requests; be polite to a small site
     timeout: float = 30.0
+    # When set, every page the site returns is saved here for troubleshooting.
+    debug_dir: str | None = None
     _last: float = field(default=0.0, repr=False)
 
     def __post_init__(self) -> None:
+        self._seq = itertools.count(1)
         self.cookies = http.cookiejar.CookieJar()
         self.opener = urllib.request.build_opener(
             urllib.request.HTTPCookieProcessor(self.cookies)
@@ -204,22 +209,44 @@ class PogClient:
         ]
 
     # -- low level ---------------------------------------------------------
-    def _request(self, url: str, data: dict | None = None, ajax: bool = False) -> str:
+    def _save_debug(self, url: str, status: int, final_url: str, text: str) -> None:
+        if not self.debug_dir:
+            return
+        try:
+            d = Path(self.debug_dir)
+            d.mkdir(parents=True, exist_ok=True)
+            slug = re.sub(r"[^A-Za-z0-9]+", "_", url.removeprefix(BASE))[:60] or "home"
+            name = f"{next(self._seq):04d}_{slug}.html"
+            header = f"<!-- {url} -> {final_url} (HTTP {status}) -->\n"
+            (d / name).write_text(header + text, encoding="utf-8")
+        except OSError:
+            pass
+
+    def _request(self, url: str, data: dict | None = None, ajax: bool = False,
+                 referer: str | None = None) -> str:
         wait = self.delay - (time.monotonic() - self._last)
         if wait > 0:
             time.sleep(wait)
         url = urllib.parse.urljoin(BASE, url)
         body = urllib.parse.urlencode(data).encode() if data is not None else None
         req = urllib.request.Request(url, data=body)
-        req.add_header("Referer", BASE)
+        req.add_header("Referer", referer or BASE)
+        if body is not None:
+            req.add_header("Origin", "https://www.pogdesign.co.uk")
+            req.add_header("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
         if ajax:
             req.add_header("X-Requested-With", "XMLHttpRequest")
+            req.add_header("Accept", "application/json, text/javascript, */*; q=0.01")
+        else:
+            req.add_header("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")
         for attempt in range(3):
             try:
                 with self.opener.open(req, timeout=self.timeout) as resp:
                     self._last = time.monotonic()
                     charset = resp.headers.get_content_charset() or "utf-8"
-                    return resp.read().decode(charset, errors="replace")
+                    text = resp.read().decode(charset, errors="replace")
+                    self._save_debug(url, resp.status, resp.geturl(), text)
+                    return text
             except urllib.error.HTTPError as e:
                 if e.code < 500 or attempt == 2:
                     raise PogError(f"HTTP {e.code} for {url}") from e
@@ -233,7 +260,7 @@ class PogClient:
     def login(self, email: str, password: str) -> None:
         self._request("login")  # pick up session cookie
         page = self._request(
-            "login", {"username": email, "password": password, "sub_login": ""}
+            "login", {"username": email, "password": password, "sub_login": "Account Login"}
         )
         if not page_is_logged_in(page):
             # Some redirects land on a page without a logout link; double-check.
@@ -264,9 +291,14 @@ class PogClient:
     def fetch_episodes(self, show: Show) -> list[Episode]:
         return parse_summary(self._request(show.url))
 
-    def mark_watched(self, ep: Episode) -> None:
+    def mark_watched(self, ep: Episode, show: Show | None = None) -> str:
+        """Tick one episode, exactly as clicking its checkbox on the show page does.
+
+        Returns the site's raw response (useful when troubleshooting).
+        """
         if not ep.watch_value:
             raise PogError(f"{ep.code} has no watch checkbox (not aired yet?)")
-        self._request(
-            "watchhandle", {"watched": "adding", "shid": ep.watch_value}, ajax=True
+        return self._request(
+            "watchhandle", {"watched": "adding", "shid": ep.watch_value},
+            ajax=True, referer=show.url if show else None,
         )

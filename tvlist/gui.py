@@ -67,6 +67,9 @@ class App(tk.Tk):
                         variable=self.specials).grid(row=2, column=0, sticky="w", **pad)
         ttk.Checkbutton(opts, text="Don't list missing episodes already marked watched on the site",
                         variable=self.hide_watched).grid(row=3, column=0, sticky="w", **pad)
+        self.debug = tk.BooleanVar(value=False)
+        ttk.Checkbutton(opts, text="Save debug files (pages from the site, for troubleshooting)",
+                        variable=self.debug).grid(row=4, column=0, sticky="w", **pad)
 
         bar = ttk.Frame(frm)
         bar.pack(fill="x", pady=6)
@@ -130,6 +133,7 @@ class App(tk.Tk):
             include_specials=self.specials.get(),
             hide_watched_missing=self.hide_watched.get(),
             aliases=load_aliases(config.aliases_path()),
+            debug_dir=str(config.debug_dir()) if self.debug.get() else None,
         )
         self.log.configure(state="normal")
         self.log.delete("1.0", "end")

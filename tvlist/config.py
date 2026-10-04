@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 from pathlib import Path
 
@@ -27,3 +28,8 @@ def save(data: dict) -> None:
 def aliases_path() -> Path:
     """Optional {"local folder name": "PoGDesign show name"} overrides."""
     return DIR / "aliases.json"
+
+
+def debug_dir() -> Path:
+    """Fresh folder for one run's debug files."""
+    return DIR / "debug" / _dt.datetime.now().strftime("%Y%m%d-%H%M%S")

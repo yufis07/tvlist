@@ -124,9 +124,10 @@ class Matching(unittest.TestCase):
 
 
 class FakeClient:
-    def __init__(self):
+    def __init__(self, ticks_stick=True):
         self.marked = []
         self.logged_in = None
+        self.ticks_stick = ticks_stick
 
     def login(self, email, password):
         self.logged_in = email
@@ -138,6 +139,13 @@ class FakeClient:
         }
 
     def fetch_episodes(self, show):
+        eps = self._episodes(show)
+        if self.ticks_stick:
+            for e in eps:
+                e.watched = e.watched or e.watch_value in self.marked
+        return eps
+
+    def _episodes(self, show):
         d = dt.date
         if show.id == "10":
             return [
@@ -151,19 +159,19 @@ class FakeClient:
             Episode(1, 2, "b2", d(2030, 1, 1), False, False, None),
         ]
 
-    def mark_watched(self, ep):
+    def mark_watched(self, ep, show=None):
         self.marked.append(ep.watch_value)
 
 
 class EndToEnd(unittest.TestCase):
-    def run_with(self, **kw):
+    def run_with(self, client=None, **kw):
         with tempfile.TemporaryDirectory() as d:
             for f in ["Alpha/Season 1/Alpha - S01E01.mkv", "Alpha/Season 1/Alpha - S01E02.mkv",
                       "Alpha/Season 1/Alpha - S01E04.mkv", "Gamma/Gamma.S01E01.mkv"]:
                 p = Path(d) / f
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_bytes(b"")
-            client = FakeClient()
+            client = client or FakeClient()
             opts = Options(folders=[d], email="me@example.com", password="pw", **kw)
             rep = run_sync(opts, log=lambda m: None, client=client, today=dt.date(2026, 10, 4))
             return rep, client
@@ -180,6 +188,17 @@ class EndToEnd(unittest.TestCase):
         text = rep.to_text()
         self.assertIn("MISSING RELEASED EPISODES", text)
         self.assertIn("Beta [no files on disk]", text)
+        self.assertIn("Alpha <- local 'Alpha'", text)
+        self.assertEqual(res["Alpha"].unconfirmed, [])
+        self.assertNotIn("TICKS NOT CONFIRMED", text)
+
+    def test_ticks_that_do_not_stick_are_reported(self):
+        rep, client = self.run_with(client=FakeClient(ticks_stick=False))
+        res = {r.show.name: r for r in rep.results}
+        self.assertEqual([e.code for e in res["Alpha"].unconfirmed], ["S01E01"])
+        text = rep.to_text()
+        self.assertIn("TICKS NOT CONFIRMED", text)
+        self.assertIn("Alpha: S1: E01", text)
 
     def test_dry_run_and_only_local(self):
         rep, client = self.run_with(dry_run=True, include_tracked=False)

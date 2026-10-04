@@ -38,6 +38,8 @@ def cli(argv: list[str]) -> int:
     ap.add_argument("--aliases", default=str(config.aliases_path()),
                     help="JSON file mapping local show names to PoGDesign names")
     ap.add_argument("-o", "--output", help="write the report to this file")
+    ap.add_argument("--debug", action="store_true",
+                    help="save every page PoGDesign returns to ~/.tvlist/debug/ for troubleshooting")
     args = ap.parse_args(argv)
 
     if not args.folder:
@@ -54,6 +56,7 @@ def cli(argv: list[str]) -> int:
         include_specials=args.specials,
         hide_watched_missing=args.hide_watched_missing,
         aliases=load_aliases(args.aliases),
+        debug_dir=str(config.debug_dir()) if args.debug else None,
     )
     try:
         rep = run_sync(opts)
